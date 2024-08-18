@@ -35,6 +35,12 @@ struct Args {
     dynamic_fee_url: String,
     #[clap(long, help = "URL to your RPC")]
     rpc: String,
+    #[clap(
+        long,
+        help = "Path to the ore cli binary. Will default to \"ore\".",
+        default_value = "ore"
+    )]
+    ore_binary_path: String,
 }
 
 fn ensure_dir_exists(path: &str) {
@@ -161,7 +167,8 @@ async fn process_output(line: &str, client: &Client) {
 async fn async_main(args: Args) {
     let client = cloudwatch::create_cloudwatch_client().await;
 
-    let mut binding = Command::new("ore");
+    tracing::info!("path for ore binary: {}", &args.ore_binary_path);
+    let mut binding = Command::new(&args.ore_binary_path);
     let mut command = binding
         .arg("mine")
         .arg("--cores")
