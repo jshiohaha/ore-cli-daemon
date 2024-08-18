@@ -35,14 +35,16 @@ pub async fn create_cloudwatch_client() -> Client {
         .await;
 
     let client = Client::new(&config);
-    log::log(&format!("✅ Created cloudwatch client"));
+    // log::log(&format!("✅ Created cloudwatch client"));
+    println!("✅ Created cloudwatch client");
 
     return client;
 }
 
 fn parse_metrics(line: &str) -> Option<Metrics> {
     let trimmed_line = line.trim();
-    log::log(&format!("parse metrics from line: {:?}", trimmed_line));
+    // log::log(&format!("parse metrics from line: {:?}", trimmed_line));
+    println!("parse metrics from line: {:?}", trimmed_line);
 
     // let parts: Vec<Vec<&str>> = line
     // .lines()
@@ -58,24 +60,31 @@ fn parse_metrics(line: &str) -> Option<Metrics> {
     };
 
     let parts: Vec<&str> = trimmed_line.split_whitespace().collect();
-    log::log(&format!("parse metrics parts: {:?}", parts));
+    // log::log(&format!("parse metrics parts: {:?}", parts));
+    println!("parse metrics parts: {:?}", parts);
     if trimmed_line.starts_with("Stake:") {
-        log::log(&format!("building stake metric: {:?}", parts));
+        // log::log(&format!("building stake metric: {:?}", parts));
+        println!("building stake metric: {:?}", parts);
         metric.stake = Some(parts[1].parse().ok()?);
     } else if trimmed_line.starts_with("Change:") {
-        log::log(&format!("building change metric: {:?}", parts));
+        // log::log(&format!("building change metric: {:?}", parts));
+        println!("building change metric: {:?}", parts);
         metric.change = Some(parts[1].parse().ok()?);
     } else if trimmed_line.starts_with("Multiplier:") {
-        log::log(&format!("building multiplier metric: {:?}", parts));
+        // log::log(&format!("building multiplier metric: {:?}", parts));
+        println!("building multiplier metric: {:?}", parts);
         metric.multiplier = Some(parts[1].trim_end_matches('x').parse().ok()?);
     } else if trimmed_line.starts_with("Best hash:") {
-        log::log(&format!("building difficulty metric: {:?}", parts));
+        // log::log(&format!("building difficulty metric: {:?}", parts));
+        println!("building difficulty metric: {:?}", parts);
         metric.difficulty = Some(parts[4].trim_end_matches(r")").parse().ok()?);
     } else if trimmed_line.starts_with("Timestamp:") {
-        log::log(&format!("building timestamp metric: {:?}", parts));
+        // log::log(&format!("building timestamp metric: {:?}", parts));
+        println!("building timestamp metric: {:?}", parts);
         metric.timestamp = Some(format!("{}T{}Z", parts[1], parts[2]));
     } else if trimmed_line.starts_with("OK") {
-        log::log(&format!("building tx_hash metric: {:?}", parts));
+        // log::log(&format!("building tx_hash metric: {:?}", parts));
+        println!("building tx_hash metric: {:?}", parts);
         metric.tx_hash = Some(parts[1].trim().to_string());
     }
 
@@ -141,7 +150,8 @@ async fn send_metrics_to_cloudwatch(client: &Client, metrics: Metrics) -> Result
             .send()
             .await?;
     } else {
-        log::log("No metrics to report to CloudWatch");
+        // log::log("No metrics to report to CloudWatch");
+        println!("No metrics to report to CloudWatch");
     }
 
     Ok(())
@@ -155,7 +165,8 @@ pub async fn process_mining_metrics(client: &Client, line: &str) -> Result<(), S
             //     "[{:?}] tx_hash: {:?}",
             //     metrics.timestamp, metrics.tx_hash
             // ));
-            log::log(&format!("{:?}", metrics));
+            // log::log(&format!("{:?}", metrics));
+            println!("{:?}", metrics);
 
             return send_metrics_to_cloudwatch(client, metrics)
                 .await

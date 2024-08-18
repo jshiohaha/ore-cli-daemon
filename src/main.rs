@@ -13,6 +13,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tokio::runtime::Runtime;
+use tokio::time::sleep;
+use tokio::time::Duration;
 
 pub const DAEMON_FILE_PATH: &str = "/tmp/ore_miner";
 
@@ -64,7 +66,8 @@ fn stop_daemon(pid_file_path: &str) -> Result<(), std::io::Error> {
     if let Err(e) = Command::new("kill").arg(pid.to_string()).status() {
         eprintln!("Failed to stop daemon: {}", e);
     } else {
-        log::log("Daemon stopped successfully");
+        // log::log("Daemon stopped successfully");
+        println!("Daemon stopped successfully");
     }
 
     std::fs::remove_file(pid_file_path)?;
@@ -119,8 +122,8 @@ fn main() {
 
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     match daemonize.start() {
-        Ok(_) => log::log(&format!("[{:?}] ✅ Daemon started", timestamp)),
-        Err(e) => log::log(&format!("[{:?}] ❌ Error, {}", timestamp, e)),
+        Ok(_) => println!("[{:?}] Daemon started", timestamp),
+        Err(e) => println!("[{:?}] Error, {}", timestamp, e),
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -128,23 +131,26 @@ fn main() {
         .build()
         .unwrap();
     runtime.block_on(async_main(args));
+    // runtime.block_on(async_main_test());
 }
 
 async fn process_output(line: &str, client: &Client) {
     match cloudwatch::process_mining_metrics(client, line).await {
-        Ok(_) => log::log("Successfully sent metrics to CloudWatch"),
-        Err(e) => log::log(&format!("Error: {}", e)),
+        // Ok(_) => log::log("Successfully sent metrics to CloudWatch"),
+        Ok(_) => println!("Successfully sent metrics to CloudWatch"),
+        // Err(e) => log::log(&format!("Error: {}", e)),
+        Err(e) => println!("Error: {}", e),
     }
 }
 
-// async fn async_main_test() {
-//     let mut count = 0;
-//     loop {
-//         println!("Count: {}", count);
-//         sleep(Duration::from_secs(1)).await;
-//         count += 1;
-//     }
-// }
+async fn async_main_test() {
+    let mut count = 0;
+    loop {
+        println!("Count: {}", count);
+        sleep(Duration::from_secs(1)).await;
+        count += 1;
+    }
+}
 
 async fn async_main(args: Args) {
     let client = cloudwatch::create_cloudwatch_client().await;
@@ -171,7 +177,8 @@ async fn async_main(args: Args) {
         command = command.arg("--dynamic-fee-url").arg(&args.dynamic_fee_url);
     }
 
-    log::log(&format!("command: {:?}", command));
+    // log::log(&format!("command: {:?}", command));
+    println!("command: {:?}", command);
 
     let mut child = command
         .stdout(Stdio::piped())
@@ -179,7 +186,8 @@ async fn async_main(args: Args) {
         .spawn()
         .expect("Failed to start CLI tool");
 
-    log::log("ORE mining started 🛠️");
+    // log::log("ORE mining started");
+    println!("ORE mining started");
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
     let stderr = child.stderr.take().expect("Failed to capture stderr");
@@ -200,11 +208,13 @@ async fn async_main(args: Args) {
     let stderr_reader = BufReader::new(stderr);
     for line in stderr_reader.lines() {
         if let Ok(line) = line {
-            log::log(&format!("CLI tool stderr: {}", line));
+            // log::log(&format!("CLI tool stderr: {}", line));
+            println!("CLI tool stderr: {}", line);
         }
     }
 
     // wait for the child process to exit
     let status = child.wait().expect("Failed to wait on child");
-    log::log(&format!("CLI tool exited with status: {}", status));
+    // log::log(&format!("CLI tool exited with status: {}", status));
+    println!("CLI tool exited with status: {}", status);
 }
