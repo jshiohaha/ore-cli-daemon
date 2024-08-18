@@ -12,3 +12,6 @@ aws-types = "0.55.0"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "3.2", features = ["derive"] }
 dotenv = "0.15"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2.3"

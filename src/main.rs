@@ -1,20 +1,22 @@
 mod cloudwatch;
-mod log;
 
 extern crate dotenv;
-use dotenv::dotenv;
-
 use aws_sdk_cloudwatch::Client;
 use chrono::Local;
 use clap::Parser;
 use daemonize::Daemonize;
+use dotenv::dotenv;
 use std::fs::{create_dir_all, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tokio::runtime::Runtime;
-use tokio::time::sleep;
-use tokio::time::Duration;
+// use tokio::time::sleep;
+// use tokio::time::Duration;
+use tracing::Level;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 pub const DAEMON_FILE_PATH: &str = "/tmp/ore_miner";
 
@@ -66,7 +68,6 @@ fn stop_daemon(pid_file_path: &str) -> Result<(), std::io::Error> {
     if let Err(e) = Command::new("kill").arg(pid.to_string()).status() {
         eprintln!("Failed to stop daemon: {}", e);
     } else {
-        // log::log("Daemon stopped successfully");
         println!("Daemon stopped successfully");
     }
 
@@ -75,8 +76,14 @@ fn stop_daemon(pid_file_path: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-// #[tokio::main]
 fn main() {
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, "/var/log", "ore-miner.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    fmt()
+        .with_writer(std::io::stdout)
+        .with_writer(non_blocking.with_min_level(Level::INFO))
+        .init();
+
     let args = Args::parse();
     dotenv().ok();
 
@@ -135,22 +142,21 @@ fn main() {
 }
 
 async fn process_output(line: &str, client: &Client) {
+    tracing::info!("processing line: {}", line);
     match cloudwatch::process_mining_metrics(client, line).await {
-        // Ok(_) => log::log("Successfully sent metrics to CloudWatch"),
-        Ok(_) => println!("Successfully sent metrics to CloudWatch"),
-        // Err(e) => log::log(&format!("Error: {}", e)),
-        Err(e) => println!("Error: {}", e),
+        Ok(_) => tracing::info!("Successfully sent metrics to CloudWatch"),
+        Err(e) => tracing::error!("Error: {:?}", e),
     }
 }
 
-async fn async_main_test() {
-    let mut count = 0;
-    loop {
-        println!("Count: {}", count);
-        sleep(Duration::from_secs(1)).await;
-        count += 1;
-    }
-}
+// async fn async_main_test() {
+//     let mut count = 0;
+//     loop {
+//         println!("Count: {}", count);
+//         sleep(Duration::from_secs(1)).await;
+//         count += 1;
+//     }
+// }
 
 async fn async_main(args: Args) {
     let client = cloudwatch::create_cloudwatch_client().await;
@@ -177,8 +183,7 @@ async fn async_main(args: Args) {
         command = command.arg("--dynamic-fee-url").arg(&args.dynamic_fee_url);
     }
 
-    // log::log(&format!("command: {:?}", command));
-    println!("command: {:?}", command);
+    tracing::info!("command: {:?}", command);
 
     let mut child = command
         .stdout(Stdio::piped())
@@ -186,8 +191,7 @@ async fn async_main(args: Args) {
         .spawn()
         .expect("Failed to start CLI tool");
 
-    // log::log("ORE mining started");
-    println!("ORE mining started");
+    tracing::info!("ORE mining started");
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
     let stderr = child.stderr.take().expect("Failed to capture stderr");
@@ -195,7 +199,7 @@ async fn async_main(args: Args) {
     // read stdout in a separate thread
     let cloudwatch_client = client.clone();
     std::thread::spawn(move || {
-        let rt = Runtime::new().unwrap();
+        let rt: Runtime = Runtime::new().unwrap();
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             if let Ok(line) = line {
@@ -208,13 +212,11 @@ async fn async_main(args: Args) {
     let stderr_reader = BufReader::new(stderr);
     for line in stderr_reader.lines() {
         if let Ok(line) = line {
-            // log::log(&format!("CLI tool stderr: {}", line));
-            println!("CLI tool stderr: {}", line);
+            tracing::error!("CLI tool stderr: {:?}", line);
         }
     }
 
     // wait for the child process to exit
     let status = child.wait().expect("Failed to wait on child");
-    // log::log(&format!("CLI tool exited with status: {}", status));
-    println!("CLI tool exited with status: {}", status);
+    tracing::info!("CLI tool exited with status: {}", status);
 }

@@ -4,8 +4,6 @@ use aws_sdk_cloudwatch::types::{Dimension, MetricDatum, StandardUnit};
 use aws_sdk_cloudwatch::{Client, Error};
 use aws_types::region::Region;
 
-use crate::log;
-
 #[derive(Debug)]
 struct Metrics {
     stake: Option<f64>,
@@ -35,21 +33,20 @@ pub async fn create_cloudwatch_client() -> Client {
         .await;
 
     let client = Client::new(&config);
-    // log::log(&format!("✅ Created cloudwatch client"));
-    println!("✅ Created cloudwatch client");
+    tracing::info!("Created cloudwatch client");
 
     return client;
 }
 
 fn parse_metrics(line: &str) -> Option<Metrics> {
     let trimmed_line = line.trim();
-    // log::log(&format!("parse metrics from line: {:?}", trimmed_line));
-    println!("parse metrics from line: {:?}", trimmed_line);
+    tracing::info!("parse metrics from line: {:?}", trimmed_line);
 
     // let parts: Vec<Vec<&str>> = line
-    // .lines()
-    // .map(|line| line.trim().split_whitespace().collect())
-    // .collect();
+    //      .lines()
+    //      .map(|line| line.trim().split_whitespace().collect())
+    //      .collect();
+
     let mut metric = Metrics {
         stake: None,
         change: None,
@@ -60,31 +57,24 @@ fn parse_metrics(line: &str) -> Option<Metrics> {
     };
 
     let parts: Vec<&str> = trimmed_line.split_whitespace().collect();
-    // log::log(&format!("parse metrics parts: {:?}", parts));
-    println!("parse metrics parts: {:?}", parts);
+    tracing::info!("parse metrics parts: {:?}", parts);
     if trimmed_line.starts_with("Stake:") {
-        // log::log(&format!("building stake metric: {:?}", parts));
-        println!("building stake metric: {:?}", parts);
+        tracing::info!("building stake metric: {:?}", parts);
         metric.stake = Some(parts[1].parse().ok()?);
     } else if trimmed_line.starts_with("Change:") {
-        // log::log(&format!("building change metric: {:?}", parts));
-        println!("building change metric: {:?}", parts);
+        tracing::info!("building change metric: {:?}", parts);
         metric.change = Some(parts[1].parse().ok()?);
     } else if trimmed_line.starts_with("Multiplier:") {
-        // log::log(&format!("building multiplier metric: {:?}", parts));
-        println!("building multiplier metric: {:?}", parts);
+        tracing::info!("building multiplier metric: {:?}", parts);
         metric.multiplier = Some(parts[1].trim_end_matches('x').parse().ok()?);
     } else if trimmed_line.starts_with("Best hash:") {
-        // log::log(&format!("building difficulty metric: {:?}", parts));
-        println!("building difficulty metric: {:?}", parts);
+        tracing::info!("building difficulty metric: {:?}", parts);
         metric.difficulty = Some(parts[4].trim_end_matches(r")").parse().ok()?);
     } else if trimmed_line.starts_with("Timestamp:") {
-        // log::log(&format!("building timestamp metric: {:?}", parts));
-        println!("building timestamp metric: {:?}", parts);
+        tracing::info!("building timestamp metric: {:?}", parts);
         metric.timestamp = Some(format!("{}T{}Z", parts[1], parts[2]));
     } else if trimmed_line.starts_with("OK") {
-        // log::log(&format!("building tx_hash metric: {:?}", parts));
-        println!("building tx_hash metric: {:?}", parts);
+        tracing::info!("building tx_hash metric: {:?}", parts);
         metric.tx_hash = Some(parts[1].trim().to_string());
     }
 
@@ -150,8 +140,7 @@ async fn send_metrics_to_cloudwatch(client: &Client, metrics: Metrics) -> Result
             .send()
             .await?;
     } else {
-        // log::log("No metrics to report to CloudWatch");
-        println!("No metrics to report to CloudWatch");
+        tracing::info!("No metrics to report to CloudWatch");
     }
 
     Ok(())
@@ -161,12 +150,11 @@ pub async fn process_mining_metrics(client: &Client, line: &str) -> Result<(), S
     if line.len() > 0 {
         if let Some(metrics) = parse_metrics(line) {
             // // note: could send somewhere else, like a database?
-            // log::log(&format!(
+            // tracing::info!(
             //     "[{:?}] tx_hash: {:?}",
             //     metrics.timestamp, metrics.tx_hash
-            // ));
-            // log::log(&format!("{:?}", metrics));
-            println!("{:?}", metrics);
+            // );
+            tracing::info!("{:?}", metrics);
 
             return send_metrics_to_cloudwatch(client, metrics)
                 .await
