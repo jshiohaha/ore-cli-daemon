@@ -56,6 +56,11 @@ fn parse_metrics(line: &str) -> Option<Metrics> {
         tx_hash: None,
     };
 
+    //
+    // ["Best hash:", "Timestamp:", "OK"] are not available in the default ore-cli
+    // client because those values are output based on a spinner's progress object
+    // as opposed to stdout.
+    //
     let parts: Vec<&str> = trimmed_line.split_whitespace().collect();
     tracing::info!("parse metrics parts: {:?}", parts);
     if trimmed_line.starts_with("Stake:") {
