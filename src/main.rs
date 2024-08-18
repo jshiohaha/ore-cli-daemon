@@ -188,8 +188,8 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    // runtime.block_on(async_main(args));
-    runtime.block_on(async_main_test());
+    runtime.block_on(async_main(args));
+    // runtime.block_on(async_main_test());
 }
 
 async fn process_output(line: &str, client: &Client) {
