@@ -1,4 +1,5 @@
 mod cloudwatch;
+mod errors;
 
 extern crate dotenv;
 use aws_sdk_cloudwatch::Client;
@@ -6,10 +7,12 @@ use chrono::Local;
 use clap::Parser;
 use daemonize::Daemonize;
 use dotenv::dotenv;
-use std::fs::{create_dir_all, File};
+use std::env;
+use std::fs::{create_dir_all, remove_file, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 use tokio::runtime::Runtime;
 use tokio::time::sleep;
 use tokio::time::Duration;
@@ -18,6 +21,8 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use which::which;
+
+use errors::{OreMinerError, Result};
 
 pub const DAEMON_FILE_PATH: &str = "/tmp/ore_miner";
 pub const STANDALONE_BINARY_NAME: &str = "ore";
@@ -45,161 +50,49 @@ struct Args {
     ore_binary_path: String,
 }
 
-fn ensure_dir_exists(path: &str) {
+fn ensure_dir_exists(path: &str) -> Result<()> {
     let path = Path::new(path);
     if !path.exists() {
         match create_dir_all(path) {
             Ok(_) => tracing::info!("Directory created: {:?}", path),
-            Err(e) => eprintln!("Failed to create directory: {}", e),
+            Err(e) => {
+                eprintln!("Failed to create directory: {}", e);
+                return Err(OreMinerError::Io(e));
+            }
         }
     }
-}
-
-fn is_process_running(pid: i32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .is_ok()
-}
-
-fn stop_daemon(pid_file_path: &str) -> Result<(), std::io::Error> {
-    let mut file = File::open(pid_file_path)?;
-    let mut pid = String::new();
-    file.read_to_string(&mut pid)?;
-    let pid: i32 = pid
-        .trim()
-        .parse()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    // send SIGTERM to the process
-    if let Err(e) = Command::new("kill").arg(pid.to_string()).status() {
-        eprintln!("Failed to stop daemon: {}", e);
-    } else {
-        tracing::info!("Daemon stopped successfully");
-    }
-
-    std::fs::remove_file(pid_file_path)?;
 
     Ok(())
 }
 
-///
-/// tracing statements propagate to the log files. println statements also propagate to stdout for the user
-/// up until the daemon is started. then, stdout/stderr is redirected to the log files.
-///
 fn main() {
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, "/var/log", "ore-miner.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    fmt()
-        .with_writer(std::io::stdout)
-        .with_writer(non_blocking.with_min_level(Level::INFO))
-        .init();
+    if let Err(e) = run() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    dotenv().ok();
+    ensure_dir_exists(DAEMON_FILE_PATH)?;
 
     let args = Args::parse();
-    dotenv().ok();
 
-    ensure_dir_exists(DAEMON_FILE_PATH);
+    setup_logging()?;
+    // alert the user based on stderr and then exit the program?
+    ensure_binary_exists(&args.ore_binary_path)?;
 
-    // print the binary path if the default
-    let binary = args.ore_binary_path.as_str();
-    if binary.eq(STANDALONE_BINARY_NAME) {
-        tracing::info!(
-            "No custom binary provided, checking that the default binary = {} is in the system's path",
-            binary
-        );
+    let pid_file_path = format!("{}/process.pid", DAEMON_FILE_PATH);
+    handle_existing_daemon(&pid_file_path)?;
 
-        match which(binary) {
-            Ok(path) => {
-                tracing::info!("{} is located at: {}", binary, path.display());
-            }
-            Err(e) => {
-                tracing::error!("{:?} not found in PATH: {:?}", binary, e);
+    start_daemon()?;
 
-                // alert the user based on stderr and then exit the program
-                eprintln!(
-                    "\n[Daemonization Failed] Unable to find the default {:?} binary in the system path. Make sure it's in the path or provide the path override with the \"ore_binary_path\" arg, and then try again.",
-                    binary
-                );
-
-                return;
-            }
-        }
-    }
-
-    let pid_file_path = format!("{}/process.pid", DAEMON_FILE_PATH); // Check if the daemon is already running
-    if let Ok(mut file) = File::open(&pid_file_path) {
-        let mut pid = String::new();
-        if file.read_to_string(&mut pid).is_ok() {
-            if let Ok(pid) = pid.trim().parse::<i32>() {
-                if is_process_running(pid) {
-                    tracing::info!("Daemon is already running. Stopping it first.");
-                    if let Err(e) = stop_daemon(&pid_file_path) {
-                        eprintln!(
-                            "\n[Daemonization Failed] Unable to stop existing daemon: {}",
-                            e
-                        );
-
-                        return;
-                    }
-                } else {
-                    // PID file exists but process is not running, remove the stale PID file
-                    if let Err(e) = std::fs::remove_file(&pid_file_path) {
-                        eprintln!(
-                            "\n[Daemonization Failed] Unable to remove stale PID file: {}",
-                            e
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    let stdout = File::create(format!("{}/daemon.out", DAEMON_FILE_PATH)).unwrap();
-    let stderr = File::create(format!("{}/daemon.err", DAEMON_FILE_PATH)).unwrap();
-
-    println!("Starting daemon... Check logs for subsequent output.");
-    let daemonize = Daemonize::new()
-        .pid_file(pid_file_path)
-        .chown_pid_file(true)
-        .working_directory("/tmp")
-        .user(std::env::var("USER").as_deref().unwrap_or("root"))
-        .group("daemon")
-        .umask(0o777)
-        .stdout(stdout)
-        .stderr(stderr)
-        .privileged_action(|| "Daemon privileged action");
-
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-    match daemonize.start() {
-        Ok(_) => {
-            tracing::info!("[{:?}] Daemon started", timestamp);
-            println!("[{:?}] Daemon started", timestamp);
-        }
-        Err(e) => {
-            tracing::error!("[{:?}] Error, {}", timestamp, e);
-            eprintln!("\n[Daemonization Failed] Unable to start daemon");
-            return;
-        }
-    }
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async_main(args));
+    let runtime = setup_runtime()?;
+    runtime.block_on(async_main(args))
     // runtime.block_on(async_main_test());
 }
 
-async fn process_output(line: &str, client: &Client) {
-    tracing::info!("processing line: {}", line);
-    match cloudwatch::process_mining_metrics(client, line).await {
-        Ok(_) => tracing::info!("Successfully sent metrics to CloudWatch"),
-        Err(e) => tracing::error!("Error: {:?}", e),
-    }
-}
-
+#[allow(dead_code)]
 async fn async_main_test() {
     let mut count = 0;
     loop {
@@ -209,12 +102,168 @@ async fn async_main_test() {
     }
 }
 
-async fn async_main(args: Args) {
-    let client = cloudwatch::create_cloudwatch_client().await;
+fn setup_logging() -> Result<()> {
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, "/var/log", "ore-miner.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    fmt()
+        .with_writer(std::io::stdout)
+        .with_writer(non_blocking.with_min_level(Level::INFO))
+        .init();
 
-    tracing::info!("path for ore binary: {}", &args.ore_binary_path);
-    let mut binding = Command::new(&args.ore_binary_path);
-    let mut command = binding
+    Ok(())
+}
+
+fn ensure_binary_exists(binary_path: &str) -> Result<()> {
+    if binary_path == STANDALONE_BINARY_NAME {
+        tracing::info!(
+            "No custom binary provided, checking that the default binary = {} is in the system's path",
+            binary_path
+        );
+
+        match which(binary_path) {
+            Ok(_) => tracing::info!("{} is located in the system path", binary_path),
+            Err(e) => {
+                println!(
+                    "Error: The '{}' binary was not found in the system path.",
+                    binary_path
+                );
+                return Err(OreMinerError::BinaryNotFound(
+                    binary_path.to_string(),
+                    e.to_string(),
+                ));
+            }
+        }
+    } else {
+        let path = std::path::Path::new(binary_path);
+        if !path.exists() {
+            println!(
+                "Error: The specified binary '{}' does not exist.",
+                binary_path
+            );
+            return Err(OreMinerError::BinaryNotFound(
+                binary_path.to_string(),
+                "The specified path does not exist".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_existing_daemon(pid_file_path: &str) -> Result<()> {
+    let mut file = File::open(pid_file_path).map_err(|e| OreMinerError::Io(e))?;
+    let mut pid = String::new();
+    file.read_to_string(&mut pid)
+        .map_err(|e| OreMinerError::Io(e))?;
+
+    let pid: i32 = pid.trim().parse().map_err(|e| OreMinerError::PidParse(e))?;
+    if is_process_running(pid) {
+        tracing::info!("Daemon is already running. Stopping it first.");
+        stop_daemon(pid_file_path)
+            .map_err(|e| OreMinerError::Daemon(format!("Unable to stop existing daemon: {}", e)))?;
+    } else {
+        tracing::info!("Removing stale PID file.");
+        remove_file(pid_file_path).map_err(|e| OreMinerError::Io(e))?;
+    }
+
+    Ok(())
+}
+
+fn is_process_running(pid: i32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn stop_daemon(pid_file_path: &str) -> Result<()> {
+    let mut file = File::open(pid_file_path)?;
+    let mut pid = String::new();
+    file.read_to_string(&mut pid)?;
+    let pid: i32 = pid.trim().parse()?;
+
+    std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|e| OreMinerError::Daemon(format!("Failed to stop daemon: {}", e)))?;
+
+    tracing::info!("Daemon stopped successfully");
+
+    std::fs::remove_file(pid_file_path)?;
+
+    Ok(())
+}
+
+fn start_daemon() -> Result<()> {
+    let stdout = File::create(format!("{}/daemon.out", DAEMON_FILE_PATH))
+        .map_err(|e| OreMinerError::Io(e))?;
+    let stderr = File::create(format!("{}/daemon.err", DAEMON_FILE_PATH))
+        .map_err(|e| OreMinerError::Io(e))?;
+
+    println!("Starting daemon... Check logs for subsequent output.");
+
+    /*
+     * note: unwrap_or_else has a closure and is more efficient than unwrap_or because it only creates the string if needed
+     */
+    let user = env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let pid_file_path = format!("{}/process.pid", DAEMON_FILE_PATH);
+
+    let daemonize = Daemonize::new()
+        .pid_file(&pid_file_path)
+        .chown_pid_file(true)
+        .working_directory("/tmp")
+        .user(user.as_str())
+        .group("daemon")
+        .umask(0o777)
+        .stdout(stdout)
+        .stderr(stderr)
+        .privileged_action(|| "Daemon privileged action");
+
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+
+    daemonize.start().map_err(|e| {
+        let error_msg = format!("[{:?}] Error starting daemon: {}", timestamp, e);
+        tracing::error!("{}", error_msg);
+        OreMinerError::Daemon(error_msg)
+    })?;
+
+    let success_msg = format!("[{:?}] Daemon started", timestamp);
+    tracing::info!("{}", success_msg);
+
+    Ok(())
+}
+
+fn setup_runtime() -> Result<Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| OreMinerError::Io(e.into()))
+}
+
+async fn async_main(args: Args) -> Result<()> {
+    let client = cloudwatch::create_cloudwatch_client().await?;
+    let mut command = build_command(&args);
+
+    let mut child = spawn_child_process(&mut command)?;
+
+    let (stdout_handle, stderr_handle) = spawn_output_handlers(&mut child, &client)?;
+
+    let status = child
+        .wait()
+        .map_err(|e| OreMinerError::CommandExecution(e.to_string()))?;
+    tracing::info!("CLI tool exited with status: {}", status);
+
+    stdout_handle.join().expect("Failed to join stdout thread");
+    stderr_handle.join().expect("Failed to join stderr thread");
+
+    Ok(())
+}
+
+fn build_command(args: &Args) -> Command {
+    let mut command = Command::new(&args.ore_binary_path);
+    command
         .arg("mine")
         .arg("--cores")
         .arg(&args.cores)
@@ -224,51 +273,62 @@ async fn async_main(args: Args) {
         .arg(&args.rpc);
 
     if !args.fee_payer.is_empty() {
-        command = command.arg("--fee-payer").arg(&args.fee_payer);
+        command.arg("--fee-payer").arg(&args.fee_payer);
     }
 
     if args.dynamic_fee {
-        command = command.arg("--dynamic-fee");
+        command.arg("--dynamic-fee");
     }
 
     if !args.dynamic_fee_url.is_empty() {
-        command = command.arg("--dynamic-fee-url").arg(&args.dynamic_fee_url);
+        command.arg("--dynamic-fee-url").arg(&args.dynamic_fee_url);
     }
 
-    tracing::info!("command: {:?}", command);
+    command
+}
 
-    let mut child = command
+fn spawn_child_process(command: &mut Command) -> Result<Child> {
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to start CLI tool");
+        .map_err(|e| OreMinerError::CommandExecution(e.to_string()))
+}
 
-    tracing::info!("ORE mining started");
+fn spawn_output_handlers(
+    child: &mut Child,
+    client: &Client,
+) -> Result<(JoinHandle<()>, JoinHandle<()>)> {
+    let stdout = child.stdout.take().ok_or(OreMinerError::CommandExecution(
+        "Failed to capture stdout".to_string(),
+    ))?;
+    let stderr = child.stderr.take().ok_or(OreMinerError::CommandExecution(
+        "Failed to capture stderr".to_string(),
+    ))?;
 
-    let stdout = child.stdout.take().expect("Failed to capture stdout");
-    let stderr = child.stderr.take().expect("Failed to capture stderr");
-
-    // read stdout in a separate thread
     let cloudwatch_client = client.clone();
-    std::thread::spawn(move || {
+    let stdout_handle = std::thread::spawn(move || {
         let rt: Runtime = Runtime::new().unwrap();
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                rt.block_on(process_output(&line, &cloudwatch_client));
-            }
+        for line in reader.lines().flatten() {
+            rt.block_on(process_output(&line, &cloudwatch_client));
         }
     });
 
-    // read stderr in the main thread
-    let stderr_reader = BufReader::new(stderr);
-    for line in stderr_reader.lines() {
-        if let Ok(line) = line {
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
             tracing::error!("CLI tool stderr: {:?}", line);
         }
-    }
+    });
 
-    // wait for the child process to exit
-    let status = child.wait().expect("Failed to wait on child");
-    tracing::info!("CLI tool exited with status: {}", status);
+    Ok((stdout_handle, stderr_handle))
+}
+
+async fn process_output(line: &str, client: &Client) {
+    tracing::info!("processing line: {}", line);
+    match cloudwatch::process_mining_metrics(client, line).await {
+        Ok(_) => tracing::info!("Successfully sent metrics to CloudWatch"),
+        Err(e) => tracing::error!("Error: {:?}", e),
+    }
 }
